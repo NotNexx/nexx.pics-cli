@@ -1,48 +1,12 @@
 import inquirer from "inquirer";
-import axios from "axios";
-import FormData from "form-data";
-import fs from "fs";
 import clipboardy from "clipboardy";
 
+import JsonUtil from "./utils/jsonUtil.js";
+import { createShort, remove, upload } from "./utils/apiUtil.js";
+import { promptAndDetectFilesByPrefix } from './utils/detectionUtil.js';
 
-const configPath = "config.json";
-const uploadsPath = "uploads.json";
 
-function readConfig(): { authKey: string } | null {
-    try {
-        const configData = fs.readFileSync(configPath, "utf8");
-        return JSON.parse(configData);
-    } catch (error) {
-        return null;
-    }
-}
-
-function writeConfig(config: { authKey: string }) {
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-}
-
-function createUploads(uploads: { uploads: { filename: string, deletionUrl: string }[] }) {
-    fs.writeFileSync(uploadsPath, JSON.stringify(uploads, null, 2));
-}
-
-function deleteUploadedFile(filename: string) {
-    const uploads = readUploads();
-    if (uploads) {
-        const newUploads = uploads.uploads.filter((upload) => upload.filename !== filename);
-        createUploads({ uploads: newUploads });
-    }
-}
-
-function readUploads(): { uploads: { filename: string, deletionUrl: string }[] } | null {
-    try {
-        const uploadsData = fs.readFileSync(uploadsPath, "utf8");
-        return JSON.parse(uploadsData);
-    } catch (error) {
-        return null;
-    }
-}
-
-let config = readConfig();
+let config = JsonUtil.readConfig();
 let authKey = config ? config.authKey : "";
 
 if (!authKey) {
@@ -57,11 +21,12 @@ if (!authKey) {
 
     authKey = authKeyPrompt.authKey;
 
-    writeConfig({ authKey });
+    JsonUtil.writeConfig({ authKey });
 }
 
 
 async function main() {
+    await promptAndDetectFilesByPrefix();
     let continueMenu = true;
 
     while (continueMenu) {
@@ -73,8 +38,8 @@ async function main() {
                 choices: [
                     "Upload files",
                     "Delete files",
-                    "Create URL shortener",
-                    "Delete URL shortener",
+                    "Create Short",
+                    "Delete Short",
                     "Exit",
                 ],
             },
@@ -89,13 +54,13 @@ async function main() {
             case "Delete files":
                 await deleteFile();
                 break;
-            case "Create URL shortener":
+            case "Create Short":
                 await createURL();
                 break;
-            case "Delete URL shortener":
+            case "Delete Short":
                 await deleteURL();
                 break;
-            case "Exit": 
+            case "Exit":
                 continueMenu = false;
                 console.log("Exiting...");
                 break;
@@ -105,6 +70,43 @@ async function main() {
         }
     }
 }
+
+async function uploadFile() {
+    const fileNames = await promptAndDetectFilesByPrefix();
+    if (fileNames.length === 0) {
+        console.log("No matching files found.");
+        return;
+    }
+
+    const filePrompt = await inquirer.prompt([
+        {
+            type: "list",
+            name: "selectedFile",
+            message: "Please select the file you want to upload:",
+            choices: fileNames,
+        },
+    ]);
+
+    const selectedFile = filePrompt.selectedFile;
+    const filePath = `./${selectedFile}`;
+
+    try {
+        const response = await upload(filePath, authKey);
+
+        const uploads = JsonUtil.readUploads() || { uploads: [] };
+        uploads.uploads.push({ filename: selectedFile, deletionUrl: response.deletionUrl });
+        JsonUtil.createUploads(uploads);
+
+        console.log("File uploaded successfully!");
+        console.log("Image URL:", response.imageUrl);
+        clipboardy.writeSync(response.imageUrl);
+        console.log("Image URL copied to clipboard.");
+    } catch (error) {
+        console.error("Error uploading file:", (error as Error).message);
+    }
+}
+
+/*
 
 async function uploadFile() {
     const filePrompt = await inquirer.prompt([
@@ -118,36 +120,25 @@ async function uploadFile() {
     const filePath = filePrompt.pathToFile;
 
     try {
-        const fileData = fs.readFileSync(filePath);
+        const response = await upload(filePath, authKey);
 
-        const formData = new FormData();
-        formData.append("file", fileData, {
-            filename: filePath,
-        });
-
-        const response = await axios.post("https://api.nexx.pics/files", formData, {
-            headers: {
-                ...formData.getHeaders(),
-                key: authKey,
-            },
-        });
-
-        const uploads = readUploads() || { uploads: [] };
-        uploads.uploads.push({ filename: filePath, deletionUrl: response.data.deletionUrl });
-        createUploads(uploads);
-
+        const uploads = JsonUtil.readUploads() || { uploads: [] };
+        uploads.uploads.push({ filename: filePath, deletionUrl: response.deletionUrl });
+        JsonUtil.createUploads(uploads);
 
         console.log("File uploaded successfully!");
-        console.log("Image URL:", response.data.imageUrl);
-        clipboardy.writeSync(response.data.imageUrl);
+        console.log("Image URL:", response.imageUrl);
+        clipboardy.writeSync(response.imageUrl);
         console.log("Image URL copied to clipboard.");
     } catch (error) {
         console.error("Error uploading file:", (error as Error).message);
     }
 }
 
+*/
+
 async function deleteFile() {
-    const uploads = readUploads();
+    const uploads = JsonUtil.readUploads();
 
     if (uploads && uploads.uploads.length > 0) {
         const choices = uploads.uploads.map((upload) => upload.filename);
@@ -165,10 +156,9 @@ async function deleteFile() {
 
         const deletionUrl = uploads.uploads.find((upload) => upload.filename === selectedFile)?.deletionUrl;
 
-        const response = await axios.get(deletionUrl as string)
-        if (response.status === 200) {
-            console.log(`Deleted file: ${selectedFile}`);
-            deleteUploadedFile(selectedFile);
+        if (deletionUrl) {
+            remove(deletionUrl, selectedFile);
+            JsonUtil.deleteUploadedFile(selectedFile);
         }
         else {
             console.log(`Error deleting file: ${selectedFile}`);
@@ -187,7 +177,21 @@ async function createURL() {
             message: "Please input the URL you want to shorten:",
         },
     ]);
-    console.log(urlPrompt.url);
+
+    const url = urlPrompt.url;
+
+    try {
+        const response = await createShort(url, authKey);
+
+        if (response.success) {
+            console.log("Shortened URL:", response.shortUrl);
+            console.log("Deletion URL:", response.deletionUrl);
+        } else {
+            console.error("Error creating URL:", response.error);
+        }
+    } catch (error) {
+        console.error(`Error creating URL: ${(error as Error).message}`);
+    }
 }
 
 async function deleteURL() {
