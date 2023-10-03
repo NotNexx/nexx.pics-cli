@@ -1,0 +1,4 @@
+config.json
+uploads.json
+dist/
+node_modules/
