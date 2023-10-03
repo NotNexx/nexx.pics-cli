@@ -17,12 +17,6 @@ Install the nexx.pics cli with npm
   npm run test
 
 ```
-
-## ToDo
-
-- Add more selection suggestions
-
-- Finish URL shortening
     
 
 ## License
